@@ -18,8 +18,13 @@ from uuv_gazebo_ros_plugins_msgs.msg import FloatStamped
 from utils import geometry as G
 from utils import Pid
 
+import config
+
 class LinePlanner:
-    def __init__(self, waypoints, pose_topic):
+    def __init__(self,
+                 waypoints,
+                 pose_topic,
+                 line_topic):
         """
         a very simple line follower 'planner'.
         here just as a scaffolding that can publish Path messages we agreed on before
@@ -35,7 +40,7 @@ class LinePlanner:
         rospy.Subscriber(pose_topic, Odometry, self.update_pose)
 
         # give out a line for the controller to follow
-        self.publisher = rospy.Publisher('/lolo_auv/current_line', Path, queue_size=10)
+        self.publisher = rospy.Publisher(line_topic, Path, queue_size=10)
 
         self._frame_id = 'world'
 
@@ -60,7 +65,7 @@ class LinePlanner:
 
     def update(self):
         dist = G.euclid_distance3(self.pos, self._current_line[1])
-        if dist < 0.1:
+        if dist < 1:
             # reached the target, request to follow the next line
             self._wps = self._wps[2:]
             self._current_line = [self._wps[0], self._wps[1]]
@@ -99,11 +104,11 @@ class LoloPublisher:
         # fin 4,5 -> dont do anything
         # back_fins/0 -> horizontal, + = down
         """
-        self.fin0pub = rospy.Publisher('lolo_auv/fins/0/input', FloatStamped, queue_size=1)
-        self.fin1pub = rospy.Publisher('lolo_auv/fins/1/input', FloatStamped, queue_size=1)
-        self.fin2pub = rospy.Publisher('lolo_auv/fins/2/input', FloatStamped, queue_size=1)
-        self.fin3pub = rospy.Publisher('lolo_auv/fins/3/input', FloatStamped, queue_size=1)
-        self.backfinspub = rospy.Publisher('lolo_auv/back_fins/0/input', FloatStamped, queue_size=1)
+        self.fin0pub = rospy.Publisher(config.LOLO_FIN0_INPUT, FloatStamped, queue_size=1)
+        self.fin1pub = rospy.Publisher(config.LOLO_FIN1_INPUT, FloatStamped, queue_size=1)
+        self.fin2pub = rospy.Publisher(config.LOLO_FIN2_INPUT, FloatStamped, queue_size=1)
+        self.fin3pub = rospy.Publisher(config.LOLO_FIN3_INPUT, FloatStamped, queue_size=1)
+        self.backfinspub = rospy.Publisher(config.LOLO_BACKFIN_INPUT, FloatStamped, queue_size=1)
 
 
     def yaw(self, direction, frame_id='odom'):
@@ -127,12 +132,12 @@ class LoloPublisher:
         self.fin2pub.publish(out)
         self.fin3pub.publish(out)
 
-        if np.sign(direction)==1:
-            print('>>>')
-        elif np.sign(direction)==-1:
-            print('<<<')
-        else:
-            print('---')
+        #  if np.sign(direction)==1:
+            #  print('>>>')
+        #  elif np.sign(direction)==-1:
+            #  print('<<<')
+        #  else:
+            #  print('---')
 
     def pitch(self,direction, frame_id='odom'):
         """
@@ -144,12 +149,12 @@ class LoloPublisher:
         out.data = -direction
 
         self.backfinspub.publish(out)
-        if np.sign(direction)==1:
-            print('^^^')
-        elif np.sign(direction)==-1:
-            print('vvv')
-        else:
-            print('---')
+        #  if np.sign(direction)==1:
+            #  print('^^^')
+        #  elif np.sign(direction)==-1:
+            #  print('vvv')
+        #  else:
+            #  print('---')
 
 
 class LineController:
@@ -166,9 +171,9 @@ class LineController:
 
         self._current_line = None
         self._frame_id = 'odom'
-        self._yaw_pid = Pid.PID(0.3, 0, 1.2)
-        self._pitch_pid = Pid.PID(0.01,0.01,2)
 
+        self._yaw_pid = Pid.PID(*config.LOLO_YAW_PID)
+        self._pitch_pid = Pid.PID(*config.LOLO_PITCH_PID)
 
         self._lolopub = lolopub
 
@@ -245,18 +250,18 @@ class LineController:
 
         self._lolopub.yaw(yaw_correction)
         self._lolopub.pitch(pitch_correction)
-        print('pitch e:', pitch_error)
-        print('yaw e:',yaw_error)
+        #  print('pitch e:', pitch_error)
+        #  print('yaw e:',yaw_error)
 
 
 
 if __name__=='__main__':
     rospy.init_node('line_follower', anonymous=True)
 
-    rate = rospy.Rate(30)
-    waypoint_file = 'waypoints.csv'
-    pose_topic = 'lolo_auv/pose_gt'
-    line_topic = 'lolo_auv/current_line'
+    rate = rospy.Rate(config.UPDATE_FREQ)
+    waypoint_file = config.WAYPOINTS_FILE
+    pose_topic = config.POSE_TOPIC
+    line_topic = config.LINE_TOPIC
 
 
     # parse the csv file to a list of tuples
