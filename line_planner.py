@@ -8,6 +8,7 @@
 import numpy as np
 
 import time
+import sys
 
 import rospy
 from nav_msgs.msg import Path
@@ -64,11 +65,17 @@ class LinePlanner:
         #  self._frame_id = data.header.frame_id
 
     def update(self):
-        dist = G.euclid_distance3(self.pos, self._current_line[1])
-        if dist < 1:
+        xy_dist = G.euclid_distance(self.pos[:2], self._current_line[1][:2])
+        z_dist = np.abs(self.pos[2] - self._current_line[1][2])
+        if xy_dist <= config.LINE_END_XY_THRESHOLD and z_dist <= config.LINE_END_Z_THRESHOLD:
+            print('LINE CHANGED')
             # reached the target, request to follow the next line
-            self._wps = self._wps[2:]
-            self._current_line = [self._wps[0], self._wps[1]]
+            self._wps = self._wps[1:]
+            try:
+                self._current_line = [self._wps[0], self._wps[1]]
+            except IndexError:
+                print('Out of waypoints!')
+                sys.exit()
 
         # create a Path message with whatever frame we received the localisation in
         path = Path()
@@ -132,12 +139,12 @@ class LoloPublisher:
         self.fin2pub.publish(out)
         self.fin3pub.publish(out)
 
-        #  if np.sign(direction)==1:
-            #  print('>>>')
-        #  elif np.sign(direction)==-1:
-            #  print('<<<')
-        #  else:
-            #  print('---')
+        if np.sign(out.data)==1:
+            print('>>>',out.data)
+        elif np.sign(out.data)==-1:
+            print('<<<',out.data)
+        else:
+            print('---',out.data)
 
     def pitch(self,direction, frame_id='odom'):
         """
@@ -146,15 +153,15 @@ class LoloPublisher:
         #  direction = np.sign(direction)
         out = FloatStamped()
         out.header.frame_id = frame_id
-        out.data = -direction
+        out.data = direction
 
         self.backfinspub.publish(out)
-        #  if np.sign(direction)==1:
-            #  print('^^^')
-        #  elif np.sign(direction)==-1:
-            #  print('vvv')
-        #  else:
-            #  print('---')
+        if np.sign(out.data)==-1:
+            print('^^^',out.data)
+        elif np.sign(out.data)==1:
+            print('vvv',out.data)
+        else:
+            print('---',out.data)
 
 
 class LineController:
@@ -176,6 +183,10 @@ class LineController:
         self._pitch_pid = Pid.PID(*config.LOLO_PITCH_PID)
 
         self._lolopub = lolopub
+
+        # we need to change from yz to xz if the two points have the same 
+        # y,z values, this leads to nans in distance calculations!
+        self._using_yz_for_pitch=True
 
     def update_pose(self, data):
         datapos = data.pose.pose.position
@@ -222,36 +233,50 @@ class LineController:
         # first the yaw, find the yaw error
         # just project the 3D positions to z=0 plane for the yaw control
 
+        # cant do the same checks we did for pitch since yaw HAS to use xy plane.
+        # pitch can use either xz OR yz.
         yaw_pos = np.array(self.pos[:2])
         yaw_line_p1 = np.array(self._current_line[0][:2])
         yaw_line_p2 = np.array(self._current_line[1][:2])
 
         yaw_error = G.ptToLineSegment(yaw_line_p1, yaw_line_p2, yaw_pos)
-        # this only gives the magnitude of the error, not the 'side' of it
-        x,y = yaw_pos
-        x1,y1 = yaw_line_p1
-        x2,y2 = yaw_line_p2
-        s = (x-x1)*(y2-y1)-(y-y1)*(x2-x1)
-        # negative s = line is to the right
-        yaw_correction = np.sign(s)*self._yaw_pid.update(yaw_error, dt)
+        if not np.isnan(yaw_error):
+            # this only gives the magnitude of the error, not the 'side' of it
+            x,y = yaw_pos
+            x1,y1 = yaw_line_p1
+            x2,y2 = yaw_line_p2
+            s = (x-x1)*(y2-y1)-(y-y1)*(x2-x1)
+            # negative s = line is to the right
+            yaw_correction = np.sign(s)*self._yaw_pid.update(yaw_error, dt)
+            self._lolopub.yaw(yaw_correction)
+            #  print('yaw e:',yaw_error)
 
-        # now the pitch.
-        # use the yz plane for this
-        pitch_pos = np.array(self.pos[1:])
-        pitch_line_p1 = np.array(self._current_line[0][1:])
-        pitch_line_p2 = np.array(self._current_line[1][1:])
-        pitch_error = G.ptToLineSegment(pitch_line_p1, pitch_line_p2, pitch_pos)
-        # this only gives the magnitude of the error, not the 'side' of it
-        x,y = pitch_pos
-        x1,y1 = pitch_line_p1
-        x2,y2 = pitch_line_p2
-        s2 = (x-x1)*(y2-y1)-(y-y1)*(x2-x1)
-        pitch_correction = np.sign(s2)*self._pitch_pid.update(pitch_error, dt)
+        x0,y0,z0 = self.pos
+        x1,y1,z1 = self._current_line[0]
+        x2,y2,z2 = self._current_line[1]
 
-        self._lolopub.yaw(yaw_correction)
-        self._lolopub.pitch(pitch_correction)
-        #  print('pitch e:', pitch_error)
-        #  print('yaw e:',yaw_error)
+        # create a plane from the current line.
+        pa = np.array([x1,y1,z1])
+        pb = np.array([x2,y2,z2])
+        # put a point near the middle somewhere
+        pc = np.array([x1+10,y1+10,(z1+z2)/2])
+        # make a plane out of these 3 points
+        ab = pa-pb
+        ac = pa-pc
+        xx = np.cross(ab,ac)
+        d = xx[0]*pa[0] + xx[1]*pa[1] + xx[2]*pa[2]
+        # this function returns +1 if the point is above the plane
+        above = lambda pp: -np.sign(xx[0]*pp[0]+xx[1]*pp[1]+xx[2]*pp[2]-d)
+
+        # this gives the magnitude of the error
+        pitch_error = np.abs((xx[0]*x0+xx[1]*y0+xx[2]*z0+d)/np.sqrt(xx[0]**2+xx[1]**2+xx[2]**2))
+
+        # this only gives the magnitude of the error, not the 'side' of it
+        pitch_correction = self._pitch_pid.update(pitch_error, dt)
+
+        # combine side with magnitude for control
+        control = above(self.pos)*pitch_correction
+        self._lolopub.pitch(control)
 
 
 
@@ -266,11 +291,13 @@ if __name__=='__main__':
 
     # parse the csv file to a list of tuples
     with open(waypoint_file, 'r') as fin:
-        wps = [tuple(map(lambda a: float(a), line.split(','))) for line in fin.readlines()]
+        wps = [tuple(map(lambda a: float(a.strip()), line.split(','))) for line in fin.readlines()]
 
     # line planner acts like an external planning node and publishes a line
     # for the control to follow
-    lp = LinePlanner(wps, pose_topic)
+    lp = LinePlanner(waypoints = wps,
+                     pose_topic = pose_topic,
+                     line_topic = line_topic)
 
     # controller subs to a line topic and follows that line using PID for pitch/yaw
     # LoLo rolls when yaw'ing and we can do nothing about it now. (16/02)
